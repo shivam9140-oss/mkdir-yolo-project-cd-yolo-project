@@ -1,0 +1,111 @@
+from ultralytics import YOLO
+from deep_sort_realtime.deepsort_tracker import DeepSort
+import cv2
+import cvzone
+import math
+import time
+import os
+import torch
+
+# === Settings ===
+MODEL_PATH = "../Yolo-Weights/yolo12s.pt"  # Adjust to your actual model path
+CAM_INDEX = 0  # Webcam index
+
+# === Check if model exists ===
+if not os.path.exists(MODEL_PATH):
+    print(f"Error: Model not found at '{MODEL_PATH}'")
+    exit()
+
+# === Device selection ===
+USE_GPU = torch.cuda.is_available()
+device = 'cuda' if USE_GPU else 'cpu'
+
+# === Load YOLO model ===
+model = YOLO(MODEL_PATH)
+model.to(device)
+print(f"Model loaded on device: {device}")
+
+# === Load DeepSORT tracker ===
+tracker = DeepSort(
+    max_age=30,
+    n_init=3,
+    embedder="mobilenet",
+    half=True,
+    bgr=True,
+    embedder_gpu=USE_GPU
+)
+
+# === Open webcam ===
+cap = cv2.VideoCapture(CAM_INDEX)
+cap.set(3, 640)  # Lower resolution for faster tracking
+cap.set(4, 480)
+
+if not cap.isOpened():
+    print("Error: Could not open webcam.")
+    exit()
+
+# === COCO class names ===
+classNames = model.names if hasattr(model, 'names') else ["person", "bicycle", "car", "motorbike", "aeroplane", "bus", "train", "truck", "boat",
+              "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat",
+              "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella",
+              "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite", "baseball bat",
+              "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup",
+              "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange", "broccoli",
+              "carrot", "hot dog", "pizza", "donut", "cake", "chair", "sofa", "pottedplant", "bed",
+              "diningtable", "toilet", "tvmonitor", "laptop", "mouse", "remote", "keyboard", "cell phone",
+              "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors",
+              "teddy bear", "hair drier", "toothbrush"]
+
+prev_time = 0
+
+while True:
+    success, img = cap.read()
+    if not success:
+        continue
+
+    # === Object detection with YOLO ===
+    results = model(img, stream=True)
+
+    detections = []  # For DeepSORT
+
+    for r in results:
+        for box in r.boxes:
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            conf = float(box.conf[0])
+            cls = int(box.cls[0])
+            label = classNames[cls] if cls < len(classNames) else "Unknown"
+
+            if conf > 0.5:  # Filter low confidence
+                w, h = x2 - x1, y2 - y1
+                detections.append(([x1, y1, w, h], conf, label))
+
+    # === Update DeepSORT ===
+    tracks = tracker.update_tracks(detections, frame=img)
+
+    for track in tracks:
+        if not track.is_confirmed():
+            continue
+        track_id = track.track_id
+        ltrb = track.to_ltrb()
+        x1, y1, x2, y2 = map(int, ltrb)
+        w, h = x2 - x1, y2 - y1
+        label = f'ID: {track_id}'
+        cvzone.cornerRect(img, (x1, y1, w, h), l=9, rt=2)
+        cvzone.putTextRect(img, label, (x1, y1 - 10), scale=1, thickness=1)
+
+    # === FPS Display ===
+    curr_time = time.time()
+    fps = 1 / (curr_time - prev_time) if prev_time else 0
+    prev_time = curr_time
+    cvzone.putTextRect(img, f'FPS: {int(fps)}', (20, 50), scale=2, thickness=2, colorR=(0, 255, 0))
+
+    # === Display output ===
+    cv2.imshow("YOLO + DeepSORT Tracking", img)
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+# === Cleanup ===
+cap.release()
+cv2.destroyAllWindows()
+
